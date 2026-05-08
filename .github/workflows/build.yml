@@ -46,7 +46,7 @@ jobs:
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "PATH=$PATH"
 
-          # 持久化 Android SDK 环境变量，供后续 Gradle 步骤使用
+          # 持久化环境变量
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
 
@@ -61,9 +61,7 @@ jobs:
           fi
 
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
           "$SDKMANAGER" --version
-
           yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
 
           "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
@@ -84,7 +82,6 @@ jobs:
       - name: Patch termux-packages package name
         run: |
           cd termux-packages
-
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -92,20 +89,16 @@ jobs:
           pkg = "com.termux2"
           p = Path("scripts/properties.sh")
           s = p.read_text()
-
           s2 = re.sub(
               r'TERMUX_APP__PACKAGE_NAME="[^"]+"',
               f'TERMUX_APP__PACKAGE_NAME="{pkg}"',
               s
           )
-
           if s2 == s:
               s2 += f'\nTERMUX_APP__PACKAGE_NAME="{pkg}"\n'
-
           p.write_text(s2)
           print("已修改 termux-packages 包名为", pkg)
           PY
-
           grep -n "TERMUX_APP__PACKAGE_NAME" scripts/properties.sh || true
 
       - name: Build custom bootstrap
@@ -123,7 +116,6 @@ jobs:
 
           docker rm -f zt-sdkfix 2>/dev/null || true
 
-          # 提权运行，避免 fuse 问题（虽然 fix 容器不太需要，保持统一）
           docker run --name zt-sdkfix --privileged -u root ghcr.io/termux/package-builder:latest bash -lc '
             set -e
 
@@ -140,7 +132,6 @@ jobs:
 
             mkdir -p "$SDK"
             mkdir -p /home/builder/.android
-
             chmod -R 777 /home/builder/lib /home/builder/.android 2>/dev/null || true
 
             yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null || true
@@ -150,7 +141,7 @@ jobs:
               "build-tools;30.0.3" \
               "ndk;29.0.14206865"
 
-            # 创建编译时需要的 NDK 路径
+            # 创建 NDK 链接
             mkdir -p /root/lib
             ln -sfn "$SDK/ndk/29.0.14206865" /root/lib/android-ndk-r29
 
@@ -159,19 +150,15 @@ jobs:
             chmod -R 755 /root/lib 2>/dev/null || true
 
             echo "Check SDK:"
-            echo "  - platforms/android-33:"
-            ls -ld "$SDK/platforms/android-33" 2>/dev/null || echo "    MISSING"
-            echo "  - build-tools/30.0.3:"
-            ls -ld "$SDK/build-tools/30.0.3" 2>/dev/null || echo "    MISSING"
-            echo "  - ndk/29.0.14206865:"
-            ls -ld "$SDK/ndk/29.0.14206865" 2>/dev/null || echo "    MISSING"
-            echo "  - /root/lib/android-ndk-r29:"
-            ls -ld /root/lib/android-ndk-r29 2>/dev/null || echo "    MISSING"
-            echo "  - source.properties:"
+            ls -ld "$SDK/platforms/android-33" 2>/dev/null || echo "  MISSING"
+            ls -ld "$SDK/build-tools/30.0.3" 2>/dev/null || echo "  MISSING"
+            ls -ld "$SDK/ndk/29.0.14206865" 2>/dev/null || echo "  MISSING"
+            ls -ld /root/lib/android-ndk-r29 2>/dev/null || echo "  MISSING"
+            echo "  source.properties:"
             if [ -f /root/lib/android-ndk-r29/source.properties ]; then
               cat /root/lib/android-ndk-r29/source.properties
             else
-              echo "    NOT FOUND - this will cause build failure"
+              echo "  NOT FOUND - this will cause build failure"
               exit 1
             fi
           '
@@ -185,8 +172,11 @@ jobs:
 
           chmod -R 777 .
 
-          # 关键：修改 run-docker.sh 添加 --privileged，解决 fuse mount 权限问题
+          # 关键修复：修改 run-docker.sh 添加 --privileged
           sed -i 's/docker run/docker run --privileged/' ./scripts/run-docker.sh
+
+          # 强制单线程编译，避免 OOM
+          export TERMUX_MAKE_PROCESSES=1
 
           TERMUX_BUILDER_IMAGE_NAME=termux-package-builder-fixed \
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures "$ARCHS" \
@@ -231,44 +221,36 @@ jobs:
                   continue
               if p.suffix.lower() in skip_ext:
                   continue
-
               try:
                   s = p.read_text(errors="ignore")
               except Exception:
                   continue
-
               old = s
-
               s = s.replace("com.termux", pkg)
               s = s.replace("com_termux", pkg_under)
-
               if s != old:
                   p.write_text(s)
 
           for bg in list(Path(".").rglob("build.gradle")) + list(Path(".").rglob("build.gradle.kts")):
               s = bg.read_text(errors="ignore")
               old = s
-
               s = re.sub(
                   r'applicationId\s+["\'][^"\']+["\']',
                   f'applicationId "{pkg}"',
                   s
               )
-
               s = re.sub(
                   r'namespace\s+["\'][^"\']+["\']',
                   f'namespace "{pkg}"',
                   s
               )
-
               if "applicationId" not in s and "defaultConfig {" in s:
                   s = s.replace(
                       "defaultConfig {",
                       f'defaultConfig {{\n        applicationId "{pkg}"',
                       1
                   )
-
-              # 禁用官方 bootstrap 下载，使用我们自己编译的 bootstrap zip
+              # 禁用官方 bootstrap 下载
               start = s.find("task downloadBootstraps()")
               end = s.find("afterEvaluate {", start)
               if start != -1 and end != -1:
@@ -277,27 +259,22 @@ jobs:
                       + 'task downloadBootstraps() { doLast { logger.quiet("Using local custom bootstrap zips") } }\\n\\n'
                       + s[end:]
                   )
-
               if s != old:
                   bg.write_text(s)
 
-          # 修改应用显示名，保持类名不变
           for p in Path(".").rglob("strings.xml"):
               s = p.read_text(errors="ignore")
               old = s
-
               s = re.sub(
                   r'(<string\s+name="app_name">).*?(</string>)',
                   rf'\1{appname}\2',
                   s
               )
-
               s = re.sub(
                   r'(<string\s+name="application_name">).*?(</string>)',
                   rf'\1{appname}\2',
                   s
               )
-
               if s != old:
                   p.write_text(s)
 
@@ -310,23 +287,17 @@ jobs:
       - name: Put custom bootstrap into ZeroTermux
         run: |
           cd ZeroTermux
-
           mkdir -p app/src/main/cpp
           rm -f app/src/main/cpp/bootstrap-*.zip
-
           cp -av ../termux-packages/bootstrap-*.zip app/src/main/cpp/
-
           ls -lh app/src/main/cpp/bootstrap-*.zip
 
       - name: Build APK
         run: |
           set -e
           set -o pipefail
-
           cd ZeroTermux
-
           chmod +x ./gradlew || true
-
           ./gradlew clean :app:assembleDebug --no-daemon --stacktrace \
             | tee ../build-apk.log
 
@@ -340,9 +311,7 @@ jobs:
       - name: Collect APK
         run: |
           mkdir -p output
-
           find ZeroTermux/app/build/outputs/apk -type f -name "*.apk" -exec cp -av {} output/ \;
-
           echo "APK files:"
           ls -lh output
 
