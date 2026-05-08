@@ -1,0 +1,199 @@
+name: Build ZeroTermux2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  PKG: com.termux2
+  APPNAME: ZeroTermux2
+  ARCHS: aarch64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout empty repo
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl unzip zip jq python3 python3-pip \
+            openjdk-17-jdk ca-certificates perl sed findutils
+
+      - name: Prepare Android SDK for APK build
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-33" \
+            "platforms;android-35" \
+            "platforms;android-36" \
+            "build-tools;30.0.3" \
+            "build-tools;35.0.0" \
+            "build-tools;36.0.0" \
+            "ndk;29.0.14206865"
+
+      - name: Clone termux-packages
+        run: |
+          rm -rf termux-packages
+          git clone --depth=1 https://github.com/termux/termux-packages.git
+
+      - name: Patch termux-packages package name
+        run: |
+          cd termux-packages
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          pkg = "com.termux2"
+          p = Path("scripts/properties.sh")
+          s = p.read_text()
+
+          s2 = re.sub(
+              r'TERMUX_APP__PACKAGE_NAME="[^"]+"',
+              f'TERMUX_APP__PACKAGE_NAME="{pkg}"',
+              s
+          )
+
+          if s2 == s:
+              print("没有找到 TERMUX_APP__PACKAGE_NAME，追加一行")
+              s2 += f'\nTERMUX_APP__PACKAGE_NAME="{pkg}"\n'
+
+          p.write_text(s2)
+          print("已修改 termux-packages 包名为", pkg)
+          PY
+
+          grep -n "TERMUX_APP__PACKAGE_NAME" scripts/properties.sh || true
+
+      - name: Build custom bootstrap
+        run: |
+          cd termux-packages
+
+          docker pull ghcr.io/termux/package-builder:latest
+
+          chmod -R 777 .
+
+          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures "$ARCHS"
+
+          ls -lh bootstrap-*.zip
+
+      - name: Clone ZeroTermux source
+        run: |
+          rm -rf ZeroTermux
+          git clone --depth=1 https://github.com/hanxinhao000/ZeroTermux.git
+
+      - name: Patch ZeroTermux to com.termux2
+        run: |
+          cd ZeroTermux
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          pkg = "com.termux2"
+          appname = "ZeroTermux2"
+          pkg_under = pkg.replace(".", "_")
+
+          skip_ext = {
+              ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico",
+              ".zip", ".apk", ".aar", ".jar", ".jks", ".keystore",
+              ".so", ".bin", ".mp4", ".mp3", ".ttf", ".otf"
+          }
+
+          for p in Path(".").rglob("*"):
+              if not p.is_file():
+                  continue
+              if ".git" in p.parts:
+                  continue
+              if p.suffix.lower() in skip_ext:
+                  continue
+
+              try:
+                  s = p.read_text(errors="ignore")
+              except Exception:
+                  continue
+
+              old = s
+              s = s.replace("com.termux", pkg)
+              s = s.replace("com_termux", pkg_under)
+              s = s.replace("Termux", appname)
+
+              if s != old:
+                  p.write_text(s)
+
+          # 重点修 app/build.gradle
+          bg = Path("app/build.gradle")
+          if bg.exists():
+              s = bg.read_text()
+
+              # 确保 applicationId 为 com.termux2
+              if "applicationId" in s:
+                  s = re.sub(r'applicationId\s+["\'][^"\']+["\']', f'applicationId "{pkg}"', s)
+              else:
+                  s = s.replace("defaultConfig {", f'defaultConfig {{ applicationId "{pkg}" ', 1)
+
+              # 尽量确保 namespace 也改掉
+              if "namespace" in s:
+                  s = re.sub(r'namespace\s+["\'][^"\']+["\']', f'namespace "{pkg}"', s)
+
+              # 禁用官方 bootstrap 下载，使用我们自己的 bootstrap zip
+              start = s.find("task downloadBootstraps()")
+              end = s.find("afterEvaluate {", start)
+              if start != -1 and end != -1:
+                  s = (
+                      s[:start]
+                      + 'task downloadBootstraps() { doLast { logger.quiet("Using local custom bootstrap zips") } }\\n\\n'
+                      + s[end:]
+                  )
+
+              bg.write_text(s)
+
+          print("ZeroTermux 已修改为：", pkg, appname)
+          PY
+
+      - name: Put custom bootstrap into ZeroTermux
+        run: |
+          cd ZeroTermux
+
+          mkdir -p app/src/main/cpp
+          rm -f app/src/main/cpp/bootstrap-*.zip
+
+          cp -av ../termux-packages/bootstrap-*.zip app/src/main/cpp/
+
+          ls -lh app/src/main/cpp/bootstrap-*.zip
+
+      - name: Build APK
+        run: |
+          cd ZeroTermux
+
+          chmod +x ./gradlew || true
+
+          ./gradlew clean :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Collect APK
+        run: |
+          mkdir -p output
+
+          find ZeroTermux/app/build/outputs/apk -type f -name "*.apk" -exec cp -av {} output/ \;
+
+          echo "APK files:"
+          ls -lh output
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeroTermux2-com.termux2-apk
+          path: output/*.apk
