@@ -73,6 +73,14 @@ jobs:
             "build-tools;36.0.0" \
             "ndk;29.0.14206865"
 
+      - name: Create swap file (prevent OOM)
+        run: |
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - name: Clone termux-packages
         run: |
           rm -rf termux-packages
@@ -140,7 +148,7 @@ jobs:
               "build-tools;30.0.3" \
               "ndk;29.0.14206865"
 
-            # 创建 NDK 链接
+            # 创建 NDK 路径
             mkdir -p /root/lib
             ln -sfn "$SDK/ndk/29.0.14206865" /root/lib/android-ndk-r29
 
@@ -171,7 +179,7 @@ jobs:
 
           chmod -R 777 .
 
-          # 关键修复：添加 --privileged 并强制单线程编译（避免 OOM）
+          # 注入 --privileged 并强制单线程编译（解决 FUSE 和 OOM）
           sed -i 's/docker run/docker run --privileged -e TERMUX_MAKE_PROCESSES=1/' ./scripts/run-docker.sh
 
           TERMUX_BUILDER_IMAGE_NAME=termux-package-builder-fixed \
