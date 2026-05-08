@@ -46,7 +46,7 @@ jobs:
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "PATH=$PATH"
 
-          # 持久化环境变量，供后续步骤使用
+          # 持久化 Android SDK 环境变量，供后续 Gradle 步骤使用
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
 
@@ -123,7 +123,8 @@ jobs:
 
           docker rm -f zt-sdkfix 2>/dev/null || true
 
-          docker run --name zt-sdkfix -u root ghcr.io/termux/package-builder:latest bash -lc '
+          # 提权运行，避免 fuse 问题（虽然 fix 容器不太需要，保持统一）
+          docker run --name zt-sdkfix --privileged -u root ghcr.io/termux/package-builder:latest bash -lc '
             set -e
 
             SDK="$(ls -d /home/builder/lib/android-sdk-* | head -n 1)"
@@ -149,7 +150,7 @@ jobs:
               "build-tools;30.0.3" \
               "ndk;29.0.14206865"
 
-            # 创建 bootstrap 构建需要的 NDK 路径
+            # 创建编译时需要的 NDK 路径
             mkdir -p /root/lib
             ln -sfn "$SDK/ndk/29.0.14206865" /root/lib/android-ndk-r29
 
@@ -183,6 +184,9 @@ jobs:
           echo "========================================"
 
           chmod -R 777 .
+
+          # 关键：修改 run-docker.sh 添加 --privileged，解决 fuse mount 权限问题
+          sed -i 's/docker run/docker run --privileged/' ./scripts/run-docker.sh
 
           TERMUX_BUILDER_IMAGE_NAME=termux-package-builder-fixed \
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures "$ARCHS" \
@@ -277,7 +281,7 @@ jobs:
               if s != old:
                   bg.write_text(s)
 
-          # 尽量修改显示名称，不改类名
+          # 修改应用显示名，保持类名不变
           for p in Path(".").rglob("strings.xml"):
               s = p.read_text(errors="ignore")
               old = s
