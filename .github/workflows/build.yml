@@ -76,11 +76,14 @@ jobs:
       - name: Create swap file (optional, ignore if fails)
         run: |
           set +e
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=4096 2>/dev/null
+          echo "Trying to create swap at /tmp/swapfile ..."
+          sudo dd if=/dev/zero of=/tmp/swapfile bs=1M count=4096 2>/dev/null
           if [ $? -eq 0 ]; then
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon /swapfile
+            sudo chmod 600 /tmp/swapfile
+            sudo mkswap /tmp/swapfile
+            sudo swapon /tmp/swapfile
+            echo "Swap enabled:"
+            swapon --show
             free -h
           else
             echo "Swap creation skipped (not supported on this runner)"
@@ -185,8 +188,11 @@ jobs:
 
           chmod -R 777 .
 
-          # 注入 --privileged 并强制单线程编译（解决 FUSE 和 OOM）
-          sed -i 's/docker run/docker run --privileged -e TERMUX_MAKE_PROCESSES=1/' ./scripts/run-docker.sh
+          # 1. 给 run-docker.sh 注入 --privileged 和单线程环境变量
+          sed -i 's|docker run|docker run --privileged -e TERMUX_MAKE_PROCESSES=1|' ./scripts/run-docker.sh
+
+          # 2. 最强保险：直接在 build-bootstraps.sh 开头强制设置单线程
+          sed -i '1s|^|export TERMUX_MAKE_PROCESSES=1\n|' ./scripts/build-bootstraps.sh
 
           TERMUX_BUILDER_IMAGE_NAME=termux-package-builder-fixed \
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures "$ARCHS" \
