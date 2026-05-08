@@ -34,7 +34,7 @@ jobs:
             git curl unzip zip jq python3 python3-pip \
             ca-certificates perl sed findutils
 
-      - name: Prepare Android SDK
+      - name: Prepare Android SDK on GitHub host
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
@@ -42,7 +42,6 @@ jobs:
 
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "PATH=$PATH"
 
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
@@ -106,14 +105,36 @@ jobs:
 
           grep -n "TERMUX_APP__PACKAGE_NAME" scripts/properties.sh || true
 
+      - name: Build fixed Termux package-builder image
+        run: |
+          cat > Dockerfile.package-builder-fixed <<'EOF'
+          FROM ghcr.io/termux/package-builder:latest
+          USER root
+
+          RUN set -eux; \
+              SDK="$(find /home/builder/lib -maxdepth 1 -type d -name 'android-sdk-*' | head -n 1)"; \
+              echo "SDK=$SDK"; \
+              SDKMANAGER="$(find "$SDK" -type f -name sdkmanager | head -n 1)"; \
+              echo "SDKMANAGER=$SDKMANAGER"; \
+              yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null || true; \
+              "$SDKMANAGER" --sdk_root="$SDK" \
+                "platforms;android-33" \
+                "build-tools;30.0.3"; \
+              chown -R builder:builder /home/builder/lib /home/builder/.android || true; \
+              chmod -R 777 /home/builder/lib /home/builder/.android || true
+
+          USER builder
+          EOF
+
+          docker build -t termux-package-builder-fixed:latest -f Dockerfile.package-builder-fixed .
+
       - name: Build custom bootstrap
         run: |
           cd termux-packages
 
-          docker pull ghcr.io/termux/package-builder:latest
-
           chmod -R 777 .
 
+          TERMUX_BUILDER_IMAGE_NAME=termux-package-builder-fixed \
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures "$ARCHS"
 
           echo "Bootstrap files:"
@@ -157,15 +178,12 @@ jobs:
                   continue
 
               old = s
-
-              # 只替换包名，不乱改 TermuxActivity / TermuxService 这类类名
               s = s.replace("com.termux", pkg)
               s = s.replace("com_termux", pkg_under)
 
               if s != old:
                   p.write_text(s)
 
-          # 修改 strings.xml 里的显示名称
           for p in Path(".").rglob("strings.xml"):
               try:
                   s = p.read_text(errors="ignore")
@@ -187,7 +205,6 @@ jobs:
               if s != old:
                   p.write_text(s)
 
-          # 修 app/build.gradle
           bg = Path("app/build.gradle")
           if bg.exists():
               s = bg.read_text()
@@ -212,7 +229,6 @@ jobs:
                       s
                   )
 
-              # 禁止重新下载官方 bootstrap，使用我们自己编译的 bootstrap
               start = s.find("task downloadBootstraps()")
               end = s.find("afterEvaluate {", start)
 
