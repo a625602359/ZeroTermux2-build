@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout repo
+      - name: Checkout this repo
         uses: actions/checkout@v4
 
       - name: Setup Java 17
@@ -34,36 +34,34 @@ jobs:
             git curl unzip zip jq python3 python3-pip \
             ca-certificates perl sed findutils
 
-      - name: Prepare Android SDK for APK build
+      - name: Prepare Android SDK
         run: |
-          set -e
-
-          export ANDROID_HOME=/usr/local/lib/android/sdk
-          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
 
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "PATH=$PATH"
 
-          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+          if [ ! -x "$SDKMANAGER" ]; then
             echo "sdkmanager not found, installing commandline tools..."
             mkdir -p "$ANDROID_HOME/cmdline-tools"
-            curl -L -o /tmp/commandlinetools.zip \
+            cd /tmp
+            curl -L -o commandlinetools.zip \
               https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip
-            unzip -q /tmp/commandlinetools.zip -d "$ANDROID_HOME/cmdline-tools"
+            unzip -q commandlinetools.zip -d "$ANDROID_HOME/cmdline-tools"
             rm -rf "$ANDROID_HOME/cmdline-tools/latest"
             mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
           fi
 
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           "$SDKMANAGER" --version
-          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
 
-          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-33" \
             "platforms;android-35" \
@@ -73,23 +71,6 @@ jobs:
             "build-tools;36.0.0" \
             "ndk;29.0.14206865"
 
-      - name: Create swap file (optional, ignore if fails)
-        run: |
-          set +e
-          echo "Trying to create swap at /tmp/swapfile ..."
-          sudo dd if=/dev/zero of=/tmp/swapfile bs=1M count=4096 2>/dev/null
-          if [ $? -eq 0 ]; then
-            sudo chmod 600 /tmp/swapfile
-            sudo mkswap /tmp/swapfile
-            sudo swapon /tmp/swapfile
-            echo "Swap enabled:"
-            swapon --show
-            free -h
-          else
-            echo "Swap creation skipped (not supported on this runner)"
-          fi
-          set -e
-
       - name: Clone termux-packages
         run: |
           rm -rf termux-packages
@@ -98,129 +79,62 @@ jobs:
       - name: Patch termux-packages package name
         run: |
           cd termux-packages
+
           python3 - <<'PY'
           from pathlib import Path
           import re
+          import os
 
-          pkg = "com.termux2"
+          pkg = os.environ.get("PKG", "com.termux2")
+
           p = Path("scripts/properties.sh")
           s = p.read_text()
+
           s2 = re.sub(
               r'TERMUX_APP__PACKAGE_NAME="[^"]+"',
               f'TERMUX_APP__PACKAGE_NAME="{pkg}"',
               s
           )
+
           if s2 == s:
               s2 += f'\nTERMUX_APP__PACKAGE_NAME="{pkg}"\n'
+
           p.write_text(s2)
-          print("已修改 termux-packages 包名为", pkg)
+
+          print("termux-packages package name patched to:", pkg)
           PY
+
           grep -n "TERMUX_APP__PACKAGE_NAME" scripts/properties.sh || true
 
       - name: Build custom bootstrap
         run: |
-          set -e
-          set -o pipefail
-
           cd termux-packages
 
           docker pull ghcr.io/termux/package-builder:latest
 
-          echo "========================================"
-          echo "[1] Create fixed Docker image"
-          echo "========================================"
-
-          docker rm -f zt-sdkfix 2>/dev/null || true
-
-          docker run --name zt-sdkfix --privileged -u root ghcr.io/termux/package-builder:latest bash -lc '
-            set -e
-
-            SDK="$(ls -d /home/builder/lib/android-sdk-* | head -n 1)"
-            echo "SDK=$SDK"
-
-            SDKMANAGER="$(find "$SDK" -type f -name sdkmanager | head -n 1)"
-            echo "SDKMANAGER=$SDKMANAGER"
-
-            if [ -z "$SDKMANAGER" ]; then
-              echo "ERROR: sdkmanager not found in Docker image"
-              exit 1
-            fi
-
-            mkdir -p "$SDK"
-            mkdir -p /home/builder/.android
-            chmod -R 777 /home/builder/lib /home/builder/.android 2>/dev/null || true
-
-            yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null || true
-
-            "$SDKMANAGER" --sdk_root="$SDK" \
-              "platforms;android-33" \
-              "build-tools;30.0.3" \
-              "ndk;29.0.14206865"
-
-            # 创建 NDK 路径
-            mkdir -p /root/lib
-            ln -sfn "$SDK/ndk/29.0.14206865" /root/lib/android-ndk-r29
-
-            chown -R builder:builder /home/builder/lib /home/builder/.android /root/lib 2>/dev/null || true
-            chmod -R 777 /home/builder/lib /home/builder/.android 2>/dev/null || true
-            chmod -R 755 /root/lib 2>/dev/null || true
-
-            echo "Check SDK:"
-            ls -ld "$SDK/platforms/android-33" 2>/dev/null || echo "  MISSING"
-            ls -ld "$SDK/build-tools/30.0.3" 2>/dev/null || echo "  MISSING"
-            ls -ld "$SDK/ndk/29.0.14206865" 2>/dev/null || echo "  MISSING"
-            ls -ld /root/lib/android-ndk-r29 2>/dev/null || echo "  MISSING"
-            echo "  source.properties:"
-            if [ -f /root/lib/android-ndk-r29/source.properties ]; then
-              cat /root/lib/android-ndk-r29/source.properties
-            else
-              echo "  NOT FOUND - this will cause build failure"
-              exit 1
-            fi
-          '
-
-          docker commit zt-sdkfix termux-package-builder-fixed:latest
-          docker rm -f zt-sdkfix
-
-          echo "========================================"
-          echo "[2] Build bootstrap with fixed image"
-          echo "========================================"
-
           chmod -R 777 .
 
-          # 1. 给 run-docker.sh 注入 --privileged 和单线程环境变量
-          sed -i 's|docker run|docker run --privileged -e TERMUX_MAKE_PROCESSES=1|' ./scripts/run-docker.sh
+          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures "$ARCHS"
 
-          # 2. 最强保险：直接在 build-bootstraps.sh 开头强制设置单线程
-          sed -i '1s|^|export TERMUX_MAKE_PROCESSES=1\n|' ./scripts/build-bootstraps.sh
-
-          TERMUX_BUILDER_IMAGE_NAME=termux-package-builder-fixed \
-          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures "$ARCHS" \
-            | tee ../build-bootstrap.log
-
+          echo "Bootstrap files:"
           ls -lh bootstrap-*.zip
-
-      - name: Upload bootstrap log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-bootstrap-log
-          path: build-bootstrap.log
 
       - name: Clone ZeroTermux source
         run: |
           rm -rf ZeroTermux
           git clone --depth=1 https://github.com/hanxinhao000/ZeroTermux.git
 
-      - name: Patch ZeroTermux to com.termux2
+      - name: Patch ZeroTermux package name
         run: |
           cd ZeroTermux
+
           python3 - <<'PY'
           from pathlib import Path
           import re
+          import os
 
-          pkg = "com.termux2"
-          appname = "ZeroTermux2"
+          pkg = os.environ.get("PKG", "com.termux2")
+          appname = os.environ.get("APPNAME", "ZeroTermux2")
           pkg_under = pkg.replace(".", "_")
 
           skip_ext = {
@@ -236,97 +150,112 @@ jobs:
                   continue
               if p.suffix.lower() in skip_ext:
                   continue
+
               try:
                   s = p.read_text(errors="ignore")
               except Exception:
                   continue
+
               old = s
+
+              # 只替换包名，不乱改 TermuxActivity / TermuxService 这类类名
               s = s.replace("com.termux", pkg)
               s = s.replace("com_termux", pkg_under)
+
               if s != old:
                   p.write_text(s)
 
-          for bg in list(Path(".").rglob("build.gradle")) + list(Path(".").rglob("build.gradle.kts")):
-              s = bg.read_text(errors="ignore")
+          # 修改 strings.xml 里的显示名称
+          for p in Path(".").rglob("strings.xml"):
+              try:
+                  s = p.read_text(errors="ignore")
+              except Exception:
+                  continue
+
               old = s
               s = re.sub(
-                  r'applicationId\s+["\'][^"\']+["\']',
-                  f'applicationId "{pkg}"',
+                  r'(<string\s+name="app_name"\s*>).*?(</string>)',
+                  rf'\1{appname}\2',
                   s
               )
               s = re.sub(
-                  r'namespace\s+["\'][^"\']+["\']',
-                  f'namespace "{pkg}"',
+                  r'(<string\s+name="application_name"\s*>).*?(</string>)',
+                  rf'\1{appname}\2',
                   s
               )
-              if "applicationId" not in s and "defaultConfig {" in s:
+
+              if s != old:
+                  p.write_text(s)
+
+          # 修 app/build.gradle
+          bg = Path("app/build.gradle")
+          if bg.exists():
+              s = bg.read_text()
+
+              if "applicationId" in s:
+                  s = re.sub(
+                      r'applicationId\s+["\'][^"\']+["\']',
+                      f'applicationId "{pkg}"',
+                      s
+                  )
+              else:
                   s = s.replace(
                       "defaultConfig {",
-                      f'defaultConfig {{\n        applicationId "{pkg}"',
+                      f'defaultConfig {{ applicationId "{pkg}" ',
                       1
                   )
-              # 禁用官方 bootstrap 下载
+
+              if "namespace" in s:
+                  s = re.sub(
+                      r'namespace\s+["\'][^"\']+["\']',
+                      f'namespace "{pkg}"',
+                      s
+                  )
+
+              # 禁止重新下载官方 bootstrap，使用我们自己编译的 bootstrap
               start = s.find("task downloadBootstraps()")
               end = s.find("afterEvaluate {", start)
+
               if start != -1 and end != -1:
                   s = (
                       s[:start]
-                      + 'task downloadBootstraps() { doLast { logger.quiet("Using local custom bootstrap zips") } }\\n\\n'
+                      + 'task downloadBootstraps() { doLast { logger.quiet("Using local custom bootstrap zips") } }\n\n'
                       + s[end:]
                   )
-              if s != old:
-                  bg.write_text(s)
 
-          for p in Path(".").rglob("strings.xml"):
-              s = p.read_text(errors="ignore")
-              old = s
-              s = re.sub(
-                  r'(<string\s+name="app_name">).*?(</string>)',
-                  rf'\1{appname}\2',
-                  s
-              )
-              s = re.sub(
-                  r'(<string\s+name="application_name">).*?(</string>)',
-                  rf'\1{appname}\2',
-                  s
-              )
-              if s != old:
-                  p.write_text(s)
+              bg.write_text(s)
 
-          print("ZeroTermux 已修改为：", pkg, appname)
+          print("ZeroTermux patched to:", pkg, appname)
           PY
 
-          echo "检查 package 替换："
-          grep -R "com.termux2" -n app/build.gradle* build.gradle* 2>/dev/null || true
+          grep -R "applicationId" -n app/build.gradle || true
+          grep -R "namespace" -n app/build.gradle || true
 
       - name: Put custom bootstrap into ZeroTermux
         run: |
           cd ZeroTermux
+
           mkdir -p app/src/main/cpp
           rm -f app/src/main/cpp/bootstrap-*.zip
+
           cp -av ../termux-packages/bootstrap-*.zip app/src/main/cpp/
+
           ls -lh app/src/main/cpp/bootstrap-*.zip
 
       - name: Build APK
         run: |
-          set -e
-          set -o pipefail
           cd ZeroTermux
-          chmod +x ./gradlew || true
-          ./gradlew clean :app:assembleDebug --no-daemon --stacktrace \
-            | tee ../build-apk.log
 
-      - name: Upload APK build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-apk-log
-          path: build-apk.log
+          chmod +x ./gradlew || true
+
+          ./gradlew clean :app:assembleDebug --no-daemon --stacktrace
 
       - name: Collect APK
         run: |
           mkdir -p output
+
           find ZeroTermux/app/build/outputs/apk -type f -name "*.apk" -exec cp -av {} output/ \;
+
           echo "APK files:"
           ls -lh output
 
